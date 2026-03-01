@@ -15,6 +15,8 @@ Output format (compact):
   - Google AI Blog
   - NVIDIA AI Blog
   - TechCrunch AI
+  - Hacker News (hnrss)
+  - GeekNews
 
 You can replace/add feeds via `FEED_URLS`.
 

@@ -32,6 +32,8 @@ FEED_URLS = [
                 "https://blog.google/technology/ai/rss/",
                 "https://blogs.nvidia.com/blog/category/ai/feed/",
                 "https://techcrunch.com/category/artificial-intelligence/feed/",
+                "https://hnrss.org/frontpage",
+                "https://feeds.feedburner.com/geeknews-feed",
             ]
         ),
     ).split(",")
