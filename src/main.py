@@ -6,17 +6,41 @@ import textwrap
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Dict, List, Tuple
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 import xml.etree.ElementTree as ET
 
 import requests
 
 
+# -----------------------------
+# Config
+# -----------------------------
 NEWS_QUERY = os.getenv("NEWS_QUERY", "artificial intelligence nasdaq")
-NEWS_COUNT = int(os.getenv("NEWS_COUNT", "15"))
-TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "15"))
+NEWS_COUNT = int(os.getenv("NEWS_COUNT", "18"))
+HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "15"))
+OUTPUT_PATH = os.getenv("OUTPUT_PATH", "")
 
-# Lightweight source quality map (0.0 ~ 1.0)
+# Comma-separated external RSS/Atom feeds (free)
+FEED_URLS = [
+    u.strip()
+    for u in os.getenv(
+        "FEED_URLS",
+        ",".join(
+            [
+                "https://openai.com/news/rss.xml",
+                "https://www.anthropic.com/news/rss.xml",
+                "https://blog.google/technology/ai/rss/",
+                "https://blogs.nvidia.com/blog/category/ai/feed/",
+                "https://techcrunch.com/category/artificial-intelligence/feed/",
+            ]
+        ),
+    ).split(",")
+    if u.strip()
+]
+
+# -----------------------------
+# Heuristic trust map (0.0~1.0)
+# -----------------------------
 SOURCE_TRUST = {
     "reuters": 0.95,
     "bloomberg": 0.95,
@@ -29,18 +53,42 @@ SOURCE_TRUST = {
     "bbc": 0.85,
     "associated press": 0.85,
     "ap": 0.85,
+    "openai": 0.88,
+    "anthropic": 0.88,
+    "google": 0.88,
+    "nvidia": 0.88,
+    "sec.gov": 0.95,
     "techcrunch": 0.75,
     "the verge": 0.75,
     "forbes": 0.7,
     "yahoo finance": 0.7,
 }
 
-MEGA_CAPS = ["nvidia", "microsoft", "apple", "amazon", "meta", "google", "alphabet", "amd", "intel", "tesla"]
+MEGA_CAPS = [
+    "nvidia",
+    "microsoft",
+    "apple",
+    "amazon",
+    "meta",
+    "google",
+    "alphabet",
+    "amd",
+    "intel",
+    "tesla",
+]
 
 
 def _google_news_rss_url(query: str) -> str:
     q = quote_plus(query)
     return f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+
+
+def _domain(url: str) -> str:
+    try:
+        host = urlparse(url).netloc.lower()
+        return host[4:] if host.startswith("www.") else host
+    except Exception:
+        return ""
 
 
 def _split_title_source(raw_title: str) -> Tuple[str, str]:
@@ -51,9 +99,19 @@ def _split_title_source(raw_title: str) -> Tuple[str, str]:
     return raw_title.strip(), "Unknown"
 
 
-def fetch_news(query: str, limit: int = 15) -> List[Dict[str, str]]:
+def _to_kst(pub_raw: str) -> str:
+    if not pub_raw:
+        return ""
+    try:
+        dt = parsedate_to_datetime(pub_raw)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return pub_raw
+
+
+def fetch_google_news(query: str, limit: int = 18) -> List[Dict[str, str]]:
     url = _google_news_rss_url(query)
-    r = requests.get(url, timeout=TIMEOUT)
+    r = requests.get(url, timeout=HTTP_TIMEOUT)
     r.raise_for_status()
 
     root = ET.fromstring(r.text)
@@ -66,32 +124,133 @@ def fetch_news(query: str, limit: int = 15) -> List[Dict[str, str]]:
         pub_date_raw = (item.findtext("pubDate") or "").strip()
 
         title, source = _split_title_source(raw_title)
-
-        pub_date = ""
-        if pub_date_raw:
-            try:
-                pub_date = parsedate_to_datetime(pub_date_raw).strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                pub_date = pub_date_raw
-
         if title:
             out.append(
                 {
                     "title": title,
                     "source": source,
                     "link": link,
-                    "published": pub_date,
+                    "published": _to_kst(pub_date_raw),
                 }
             )
     return out
 
 
+def _fetch_rss_atom(feed_url: str, limit: int = 8) -> List[Dict[str, str]]:
+    r = requests.get(feed_url, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    root = ET.fromstring(r.text)
+
+    ns = {
+        "atom": "http://www.w3.org/2005/Atom",
+    }
+
+    out: List[Dict[str, str]] = []
+
+    # RSS
+    rss_items = root.findall("./channel/item")
+    if rss_items:
+        for item in rss_items[:limit]:
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            pub_raw = (item.findtext("pubDate") or item.findtext("published") or "").strip()
+            source = _domain(link) or _domain(feed_url) or "Unknown"
+            if title:
+                out.append(
+                    {
+                        "title": title,
+                        "source": source,
+                        "link": link,
+                        "published": _to_kst(pub_raw),
+                    }
+                )
+        return out
+
+    # Atom
+    entries = root.findall(".//atom:entry", ns)
+    if entries:
+        for entry in entries[:limit]:
+            title = (entry.findtext("atom:title", default="", namespaces=ns) or "").strip()
+            link_el = entry.find("atom:link", ns)
+            link = (link_el.get("href") if link_el is not None else "") or ""
+            pub_raw = (
+                (entry.findtext("atom:updated", default="", namespaces=ns) or "").strip()
+                or (entry.findtext("atom:published", default="", namespaces=ns) or "").strip()
+            )
+            source = _domain(link) or _domain(feed_url) or "Unknown"
+            if title:
+                out.append(
+                    {
+                        "title": title,
+                        "source": source,
+                        "link": link,
+                        "published": _to_kst(pub_raw),
+                    }
+                )
+
+    return out
+
+
+def fetch_news(limit: int = 18) -> List[Dict[str, str]]:
+    merged: List[Dict[str, str]] = []
+
+    # 1) Google News (broad market pulse)
+    try:
+        merged.extend(fetch_google_news(NEWS_QUERY, limit))
+    except Exception:
+        pass
+
+    # 2) Curated free feeds (official/tech media)
+    for feed in FEED_URLS:
+        try:
+            merged.extend(_fetch_rss_atom(feed, max(3, limit // max(1, len(FEED_URLS)))))
+        except Exception:
+            continue
+
+    # De-dup by normalized title
+    seen = set()
+    uniq: List[Dict[str, str]] = []
+    for item in merged:
+        key = re.sub(r"\s+", " ", item.get("title", "").strip().lower())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        uniq.append(item)
+
+    # Sort by trust desc (lightweight heuristic), then keep top N
+    uniq.sort(key=lambda x: _trust_for_source(x.get("source", "Unknown")), reverse=True)
+    return uniq[:limit]
+
+
 def _score_sentiment(headlines: List[str]) -> int:
     positive = {
-        "beat", "growth", "surge", "rally", "record", "profit", "upgrade", "strong", "expand", "partnership", "funding", "launch",
+        "beat",
+        "growth",
+        "surge",
+        "rally",
+        "record",
+        "profit",
+        "upgrade",
+        "strong",
+        "expand",
+        "partnership",
+        "funding",
+        "launch",
     }
     negative = {
-        "drop", "fall", "miss", "lawsuit", "ban", "probe", "risk", "slowdown", "cut", "downgrade", "warning", "selloff", "delay",
+        "drop",
+        "fall",
+        "miss",
+        "lawsuit",
+        "ban",
+        "probe",
+        "risk",
+        "slowdown",
+        "cut",
+        "downgrade",
+        "warning",
+        "selloff",
+        "delay",
     }
 
     score = 0
@@ -102,28 +261,19 @@ def _score_sentiment(headlines: List[str]) -> int:
     return score
 
 
+def _trust_for_source(source: str) -> float:
+    key = source.lower().strip()
+    return next((v for k, v in SOURCE_TRUST.items() if k in key), 0.6)
+
+
 def _source_trust_score(sources: List[str]) -> float:
     if not sources:
         return 0.5
-
-    scores = []
-    for src in sources:
-        key = src.lower().strip()
-        matched = next((v for k, v in SOURCE_TRUST.items() if k in key), 0.6)
-        scores.append(matched)
+    scores = [_trust_for_source(src) for src in sources]
     return round(sum(scores) / len(scores), 2)
 
 
-def _confidence_label(score: float) -> str:
-    if score >= 0.85:
-        return "상"
-    if score >= 0.72:
-        return "중"
-    return "하"
-
-
 def classify_nasdaq_impact(score: int, mega_cap_hits: int) -> str:
-    # Penalize / reward impact when mega-cap names appear in headlines.
     adjusted = score + (1 if mega_cap_hits >= 2 else 0)
     if adjusted >= 3:
         return "긍정"
@@ -132,61 +282,64 @@ def classify_nasdaq_impact(score: int, mega_cap_hits: int) -> str:
     return "중립"
 
 
-def action_suggestion(impact: str) -> str:
-    if impact == "긍정":
-        return "오늘 행동: 추격매수 금지, 분할 접근 + 핵심주 중심"
-    if impact == "부정":
-        return "오늘 행동: 신규진입 축소, 현금/손절 라인 우선"
-    return "오늘 행동: 관망 비중 유지, 이벤트 확인 후 대응"
-
-
 def _count_mega_cap_mentions(headlines: List[str]) -> int:
     text = " ".join(headlines).lower()
     return sum(1 for name in MEGA_CAPS if name in text)
+
+
+def _format_core_3lines(news: List[Dict[str, str]]) -> List[str]:
+    top = news[:3]
+    lines: List[str] = []
+    for i, item in enumerate(top, start=1):
+        title = textwrap.shorten(item["title"], width=74, placeholder="…")
+        source = item.get("source", "Unknown")
+        lines.append(f"{i}) {title} ({source})")
+
+    # pad when < 3
+    while len(lines) < 3:
+        lines.append(f"{len(lines)+1}) (데이터 부족)")
+    return lines
 
 
 def make_briefing(news: List[Dict[str, str]]) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     if not news:
-        return "\n".join(
-            [
-                f"[AI Briefing] {now}",
-                "1) 오늘 수집된 뉴스가 없습니다.",
-                "2) 네트워크/소스 상태 점검 필요",
-                "3) 임시로 전일 기준 유지",
-                "근거 신뢰도: 하 (소스 부족)",
-                "NASDAQ 영향: 중립",
-                "리스크 체크: [ ] 손절라인 [ ] 분할원칙 [ ] 포지션 과다 여부",
-            ]
-        )
+        lines = [
+            f"[AI Briefing] {now}",
+            "핵심 3줄",
+            "1) 오늘 수집된 뉴스가 없습니다.",
+            "2) 무료 RSS 소스 연결 상태 점검 필요",
+            "3) 임시로 전일 기준 유지",
+            "NASDAQ 영향: 중립 (데이터 부족)",
+        ]
+        return "\n".join(lines)
 
-    top = news[:3]
     headlines = [n["title"] for n in news]
     score = _score_sentiment(headlines)
     mega_cap_hits = _count_mega_cap_mentions(headlines)
     impact = classify_nasdaq_impact(score, mega_cap_hits)
 
-    top_sources = [n.get("source", "Unknown") for n in top]
-    trust = _source_trust_score(top_sources)
-    confidence = _confidence_label(trust)
+    core3 = _format_core_3lines(news)
+    trust = _source_trust_score([n.get("source", "Unknown") for n in news[:3]])
 
-    lines = [f"[AI Briefing] {now}"]
-    for i, item in enumerate(top, start=1):
-        title = textwrap.shorten(item["title"], width=70, placeholder="…")
-        source = item.get("source", "Unknown")
-        lines.append(f"{i}) {title} ({source})")
-
-    lines.append(f"근거 신뢰도: {confidence} (소스평균 {trust})")
-    lines.append(f"NASDAQ 영향: {impact}")
-    lines.append(action_suggestion(impact))
-    lines.append("리스크 체크: [ ] 손절라인 [ ] 분할원칙 [ ] 포지션 과다 여부")
+    lines = [
+        f"[AI Briefing] {now}",
+        "핵심 3줄",
+        *core3,
+        f"NASDAQ 영향: {impact} (근거신뢰도 {trust})",
+    ]
     return "\n".join(lines)
 
 
 def main() -> None:
-    news = fetch_news(NEWS_QUERY, NEWS_COUNT)
-    print(make_briefing(news))
+    news = fetch_news(NEWS_COUNT)
+    result = make_briefing(news)
+    print(result)
+
+    if OUTPUT_PATH.strip():
+        with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+            f.write(result + "\n")
 
 
 if __name__ == "__main__":
