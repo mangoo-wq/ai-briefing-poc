@@ -2,8 +2,13 @@
 
 POC for a daily 08:00 KST AI news briefing with:
 - 3-line core summary
-- 1-line NASDAQ impact (positive/neutral/negative)
+- 1-line NASDAQ impact (긍정/중립/부정)
 - 1 action suggestion
+
+Current implementation:
+- Google News RSS fetch (`NEWS_QUERY`)
+- Headline sentiment keyword scoring
+- NASDAQ impact classification + action line
 
 ## Quick start
 
