@@ -34,6 +34,7 @@ You can replace/add feeds via `FEED_URLS`.
 
 ### Current measured snapshot
 - 2026-03-02 observed runs: **4 success / 0 failure** (source: `out/cron.log`)
+- 2026-03-03 quality guardrail added: relevance filtering + source-diversity top-3 selection
 
 ---
 

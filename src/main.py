@@ -79,6 +79,27 @@ MEGA_CAPS = [
     "tesla",
 ]
 
+RELEVANCE_KEYWORDS = {
+    "ai",
+    "artificial intelligence",
+    "llm",
+    "model",
+    "openai",
+    "anthropic",
+    "google",
+    "gemini",
+    "microsoft",
+    "copilot",
+    "nvidia",
+    "chip",
+    "semiconductor",
+    "datacenter",
+    "amazon",
+    "aws",
+    "meta",
+    "nasdaq",
+}
+
 
 def _google_news_rss_url(query: str) -> str:
     q = quote_plus(query)
@@ -193,6 +214,52 @@ def _fetch_rss_atom(feed_url: str, limit: int = 8) -> List[Dict[str, str]]:
     return out
 
 
+def _normalize_source_key(source: str) -> str:
+    s = (source or "").strip().lower()
+    if not s:
+        return "unknown"
+    # Collapse hostnames to root-ish keys: news.google.com -> google
+    s = s.replace("www.", "")
+    s = s.split(":", 1)[0]
+    parts = s.split(".")
+    if len(parts) >= 2 and parts[-1] in {"com", "ai", "org", "co", "io", "net"}:
+        return parts[-2]
+    return parts[0]
+
+
+def _select_diverse_top(items: List[Dict[str, str]], limit: int) -> List[Dict[str, str]]:
+    if not items:
+        return []
+
+    picked: List[Dict[str, str]] = []
+    seen_source = set()
+
+    # 1st pass: maximize source diversity
+    for item in items:
+        key = _normalize_source_key(item.get("source", ""))
+        if key in seen_source:
+            continue
+        picked.append(item)
+        seen_source.add(key)
+        if len(picked) >= limit:
+            return picked
+
+    # 2nd pass: fill remaining slots by score order
+    for item in items:
+        if item in picked:
+            continue
+        picked.append(item)
+        if len(picked) >= limit:
+            break
+
+    return picked
+
+
+def _is_relevant_title(title: str) -> bool:
+    t = (title or "").lower()
+    return any(k in t for k in RELEVANCE_KEYWORDS)
+
+
 def fetch_news(limit: int = 18) -> List[Dict[str, str]]:
     merged: List[Dict[str, str]] = []
 
@@ -213,15 +280,20 @@ def fetch_news(limit: int = 18) -> List[Dict[str, str]]:
     seen = set()
     uniq: List[Dict[str, str]] = []
     for item in merged:
-        key = re.sub(r"\s+", " ", item.get("title", "").strip().lower())
+        title = item.get("title", "").strip()
+        if not _is_relevant_title(title):
+            continue
+        key = re.sub(r"\s+", " ", title.lower())
         if not key or key in seen:
             continue
         seen.add(key)
         uniq.append(item)
 
-    # Sort by trust desc (lightweight heuristic), then keep top N
+    # Sort by trust desc (lightweight heuristic)
     uniq.sort(key=lambda x: _trust_for_source(x.get("source", "Unknown")), reverse=True)
-    return uniq[:limit]
+
+    # Then select top N with source diversity to avoid single-source dominance
+    return _select_diverse_top(uniq, limit)
 
 
 def _score_sentiment(headlines: List[str]) -> int:
