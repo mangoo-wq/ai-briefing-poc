@@ -81,7 +81,6 @@ MEGA_CAPS = [
 
 RELEVANCE_KEYWORDS = {
     "ai",
-    "artificial intelligence",
     "llm",
     "model",
     "openai",
@@ -99,6 +98,21 @@ RELEVANCE_KEYWORDS = {
     "meta",
     "nasdaq",
 }
+
+RELEVANCE_PHRASES = {
+    "artificial intelligence",
+    "machine learning",
+    "large language model",
+    "data center",
+}
+
+CLICKBAIT_PATTERNS = [
+    r"\btime to buy\?",
+    r"\bcan make you rich\b",
+    r"\bbattle royale\b",
+    r"\btop .* stocks to buy\b",
+    r"\bstock is up \d+%\b",
+]
 
 
 def _google_news_rss_url(query: str) -> str:
@@ -256,8 +270,22 @@ def _select_diverse_top(items: List[Dict[str, str]], limit: int) -> List[Dict[st
 
 
 def _is_relevant_title(title: str) -> bool:
-    t = (title or "").lower()
-    return any(k in t for k in RELEVANCE_KEYWORDS)
+    t = (title or "").lower().strip()
+    if not t:
+        return False
+
+    # Remove obvious promotional/clickbait phrasing.
+    if any(re.search(p, t) for p in CLICKBAIT_PATTERNS):
+        return False
+
+    words = set(re.findall(r"[a-zA-Z0-9]+", t))
+
+    # Single-token keywords must match as a token (avoid "repairability" -> "ai" false positive).
+    if any(k in words for k in RELEVANCE_KEYWORDS):
+        return True
+
+    # Multi-word phrases can be substring-matched.
+    return any(p in t for p in RELEVANCE_PHRASES)
 
 
 def fetch_news(limit: int = 18) -> List[Dict[str, str]]:
