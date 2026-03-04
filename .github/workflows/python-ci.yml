@@ -16,5 +16,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Relevance regression tests
+        run: python -m unittest discover -s tests -p 'test_*.py'
       - name: Smoke run
         run: python src/main.py
